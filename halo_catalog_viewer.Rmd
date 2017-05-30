@@ -1,0 +1,326 @@
+---
+title: "Halo Catalog Viewer"
+runtime: shiny
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    social: menu
+    theme: cosmo
+---
+
+<!-- Learn more about flexdashboard at https://rstudio.github.io/flexdashboard -->
+
+
+```{r setup, include=FALSE}
+
+  library(shiny)
+  library(ggplot2)
+  library(dplyr)
+  library(flexdashboard)
+  library(readr)
+  library(data.table)
+  library(viridis)
+  
+  options(shiny.maxRequestSize=1000*1024^2) # Max upload of 1 GB
+
+
+  # Function to make the column names usable as labels
+  .simpleCap <- function(x) {
+    s <- strsplit(x, " ")[[1]] # Grab first character
+    paste(toupper(substring(s, 1, 1)), substring(s, 2),sep = "", collapse = " ") # Caps it and slam it back in there
+  }
+
+  # Function for getting distances
+  gd <- function(x,y) {
+    sqrt( (x[,1] - y[1])^2 + (x[,2] - y[2])^2 + (x[,3] - y[3])^2 )
+  }
+
+```
+
+
+
+Sidebar {.sidebar}
+======================================================================
+
+### Selecting data
+You may either use the built in data provided from the __Cool-Name__ simualtions or upload your own data to use (< 1 GB and assuming the format of Rockstar outputs). Once you have a selection of halos you would like to further investigate, your subset is available for download as a .csv file.
+
+Use the __Radial Distributions__ tab to view the radial ditribution of halos around the most massive halo in the box out to the specified number of virial radii. 
+
+Use the __Table__ tab to view the halo catalog in table form. This is sorted in descending order by mass.
+
+```{r echo=F}
+  # Read in data
+  radioButtons("upload_file",label=NULL,c("Cool-Sim Data" = "c","Upload Data" = "u"), "c", inline=T)
+  fileInput("halo_cat", label = "Choose Halo Catalog:")
+  h <- 0.6751
+  halo_catalog <- reactive({
+    if(!is.null(input$halo_cat) & input$upload_file == "u") {
+      print("Using the provided data set")
+      hc <- fread(sprintf("grep -v ^# %s",input[['halo_cat']]$datapath)) %>% arrange(desc(mvir))
+    } else {
+      hc <- fread('grep -v ^# halos_z0.ascii', sep=' ', col.names=c("id","num_p","mvir","mbound_vir","rvir","vmax","rvmax","vrms","x","y","z","vx","vy","vz","Jx","Jy","Jz","E","Spin","PosUncertainty","VelUncertainty","bulk_vx","bulk_vy","bulk_vz","BulkVelUnc","n_core","m200b","m200c","m500c","m2500c","Xoff","Voff","spin_bullock","b_to_a","c_to_a","A[x]","A[y]","A[z]","b_to_a(500c)","c_to_a(500c)","A[x](500c)","A[y](500c)","A[z](500c)","Rs","Rs_Klypin","T/|U|","M_pe_Behroozi","M_pe_Diemer","Halfmass_Radius","idx","i_so","i_ph","num_cp","mmetric")) %>% arrange(desc(mvir))
+    }
+    return(hc)
+  })
+```
+
+```{r echo=F}
+  
+  # Define inputs
+  selectInput('prop1', label = 'Histogram property:', choices = c("mvir","rvir","vmax"), selected = "mvir")
+  sliderInput('n_halos', label = 'Number of Halos', min = 1, max = 2000, value = 100, step = 1)
+```
+
+ 
+
+Application author: [Tyler Kelley](http://temp.com/tykelley), [University of California, Irvine](http://www.uci.edu)
+
+Histograms
+======================================================================
+
+```{r echo=F}
+  renderPlot({
+    df <- as.data.frame(list(fprop = halo_catalog()[[grep(sprintf("%s",input$prop1), colnames(halo_catalog()))[1]]]))
+    m <- head(sort(df$fprop,decreasing = T),n = input$n_halos)
+    if (input$prop1 == "mvir") {
+      m <- log10(m)
+    }
+    dens <- density(m, bw = "nrd0", adjust = 2)
+    #ggplot(m) + geom_histogram(aes(mvir),bins=50) + scale_y_log10() + theme_bw()
+    fillPage(
+      hist(m,xlab=sprintf("%s",.simpleCap(input$prop1)),probability = T),
+      lines(dens, col = "blue")
+  )})
+```
+
+Radial Distributions
+======================================================================
+
+Row {data-height=200}
+----------------------------------------------------------------------
+
+### Select the parameters
+```{r echo=F}
+  fillRow(
+    numericInput("r_mult", "Multiple of Rvir", 1, step = 0.1, width = 150, min = 0),
+    numericInput("halo_num", "Mass rank of halo", 1, step = 1, width = 150, min = 1)
+  )
+  
+  subhalos <- reactive({
+                sel_halo <- halo_catalog()[input$halo_num,]
+                r_cut <- sel_halo$rvir * input$r_mult
+                coords <- as.matrix(select(halo_catalog(),x:z))
+                d <- gd(coords,coords[input$halo_num,])*1000 # Convert Mpc to kpc
+                sub_mask <- c(d < r_cut)
+                for (i in 1:input$halo_num){  # Ignore all halos that are more massive than selection
+                  sub_mask[i] <- FALSE
+                }
+                return(sub_mask)
+              })
+  
+  df <- reactive({
+          tmp <- select(halo_catalog()[input$halo_num,],mvir,rvir,vmax)
+          tmp$n_sub <- sum(subhalos()[])
+          return(tmp)
+        })
+```
+
+### Current Halo
+```{r echo=F}  
+  renderTable(df(), align = 'c', display = c("s","e","f","f","d"))
+```
+
+Row {.tabset .tabset-fade data-height=1000}
+----------------------------------------------------------------------
+
+### Mvir
+```{r echo=F}
+  renderPlot({
+    sub_mvir <- log10(halo_catalog()$mvir[subhalos()])
+    brk <- seq(6,ceiling(max(sub_mvir)),by=0.05)
+    csub <- cut(sub_mvir,brk,right=F)
+    sfreq <- rev(table(csub))
+    for (i in 1:length(table(csub))){
+      sfreq[i] <- sum(rev(table(csub))[1:i])
+    }
+    ggplot(data = data.frame(bins = brk, n = c(rev(sfreq),0)),aes(x=bins,y=n)) + 
+      geom_line() + scale_y_log10() + 
+      labs(x="Log Mvir",y="Log N (>M)") + theme_bw()
+  })
+```
+
+### Vmax
+```{r echo=F}
+  renderPlot({
+    sub_vmax <- halo_catalog()$vmax[subhalos()]
+    brk <- seq(5,ceiling(max(sub_vmax)),by=1)
+    csub <- cut(sub_vmax,brk,right=F)
+    sfreq <- rev(table(csub))
+    for (i in 1:length(table(csub))){
+      sfreq[i] <- sum(rev(table(csub))[1:i])
+    }
+    ggplot(data = data.frame(bins = brk, n = c(rev(sfreq),0)),aes(x=bins,y=n)) + 
+      geom_line() + scale_y_log10() + 
+      labs(x="Log Mvir",y="Log N (>M)") + theme_bw()
+  })
+```
+
+<!-- ### Orbits -->
+<!-- ```{r echo=F} -->
+<!--   #   renderPlot({ -->
+<!--   #   sub_vels <- as.matrix(select(halo_catalog()[subhalos()],vx:vz)) -->
+<!--   #   v_mag <- c() -->
+<!--   #   for (i in 1:length(sub_vels[,1])){ -->
+<!--   #     v_mag[i] <- sqrt( sub_vels[i,1]^2 + sub_vels[i,2]^2 + sub_vels[i,3]^2 ) -->
+<!--   #   } -->
+<!--   #   brk <- seq(5,ceiling(max(v_mag)),by=1) -->
+<!--   #   csub <- cut(v_mag,brk,right=F) -->
+<!--   #   sfreq <- rev(table(csub)) -->
+<!--   #   for (i in 1:length(table(csub))){ -->
+<!--   #     sfreq[i] <- sum(rev(table(csub))[1:i]) -->
+<!--   #   } -->
+<!--   #   plot(brk,log10(c(rev(sfreq),0)),type='S',xlab='|V|',ylab='Log N (>|V|)') -->
+<!--   # }) -->
+<!-- ``` -->
+
+<!-- Row -->
+<!-- ---------------------------------------------------------------------- -->
+<!-- ```{r echo=F} -->
+<!--   renderText({ -->
+<!--     sprintf("Searching for halos within %.2f Rvir of the %i most massive halo.",input$r_mult,input$halo_num) -->
+<!--   }) -->
+<!-- ``` -->
+
+
+Table
+======================================================================
+
+```{r echo=F}
+  radioButtons("disp","Display Mode", c("Basic","Complete"), "Basic", inline=T)
+```
+
+```{r echo=F}
+  renderDataTable({
+    if (input$disp == "Basic") {
+      select(halo_catalog(),id,mvir,rvir,vmax,rvmax,vrms)
+    } else {
+      halo_catalog()
+    }},
+    options=list(scrollX=TRUE, scrollY=300, scrollCollapse=TRUE)
+  )
+```
+
+Download
+============================================================================
+
+This section will download a data subset for you based off of the selected preferences either throughout the other areas of this program or the selections you will make below. 
+```{r echo=F}
+  # Get the user input for the data to download
+  radioButtons("opts","",c("Use settings throughout" = 0,"Use options below" = 1), 0, inline = T)
+```
+  
+***  
+  
+These settings will not do anything unless the __Use options below__ button is set above.
+
+1. __Number of Halos__: grabs N halos from the resulting subset. Entering 'all' will grab all halos.
+2. __Mass Rank__: selects the Nth halo in terms of mass order. Entering a '0' will remove the distance calculation and just make a table of the halo subset.
+3. __Number of Rvir__: grabs halos within N * Rvir of the mass rank halo above. Entering '0' will remove the distance cut. If Mass Rank == 0, this is ignored.
+4. __Table Type__: Basic table (ID, Mvir, Rvir, Vmax, Rvmax, Vrms) or Complete table (all columns)
+
+```{r echo = F}
+  fillRow(
+    textInput("num_halos", "Number of Halos", value = '10', width = 150),
+    numericInput("halo_num", "Mass Rank", min = 0, value = 1, step = 1, width = 150),
+    numericInput("rv_mul", "Number of Rvir", min = 1, value = 1, step = 0.1, width = 150),
+    radioButtons("ttype","Table Type", c("Basic" = 0, "Complete" = 1))
+  )
+```  
+
+***
+
+```{r echo = F}  
+  # Set up data download
+  hc_subs <- reactive({
+                        if (input$disp == "Basic"){
+                          data <- as.data.frame(select(filter(halo_catalog(),subhalos()[]),id,mvir,rvir,vmax,rvmax,vrms))
+                        } else {
+                          data <- as.data.frame(filter(halo_catalog(),subhalos()[]))
+                        }
+                      return(data$mvir)
+             })
+
+  output$downloadData <- downloadHandler(
+                          filename = function() {paste('halo_selection-',Sys.Date(),'.csv',sep='')},
+                          content = function(file) {
+                            write_csv(as.data.frame(hc_subs()), file)
+                          }
+                        )
+  downloadLink("downloadData",h4("Download CSV"))
+```
+
+About
+============================================================================
+
+This application is in support of the paper in _MNRAS_, ["Cool Paper Title"](https://academic.oup.com/mnras). 
+
+This application allows visitors to explore this part of the paper interactively.  The article follows by using local exploratory spatial data analysis techniques to identify how spatial clusters of diversity have shifted over time; this will be the focus of a future application that corresponds to an extension of the study published in _Urban Studies._
+
+The application is built with the [Shiny](http://shiny.rstudio.com) framework for the [R programming language](https://www.r-project.org/). The application layout is produced with the [flexdashboard](http://rstudio.github.io/flexdashboard/index.html) package, and the plots use  [ggplot2](http://ggplot2.org/).
+
+Research code for the article is available upon request, and will be formally released this summer as a GitHub repository.  Code for the application is available at <https://github.com/tykelley/halo_catalog_viewer>.
+
+I welcome feedback and suggestions!  
+<!-- [Please visit my personal website](http://temp.com/tykelley) for contact information or [connect with me on Twitter](https://twitter.com/tylerkelleyy). -->
+
+<!-- <style> -->
+
+<!-- .section.sidebar { -->
+
+<!--   background-color: white; -->
+<!--   font-family: "Open-Sans", "Helvetica Neue", Helvetica, Arial, sans-serif; -->
+
+<!-- } -->
+
+<!-- .js-irs-0 .irs-bar { -->
+<!-- border-top-color: #443A83; -->
+<!-- border-bottom-color: #443A83; -->
+<!-- } -->
+
+<!-- .js-irs-0 .irs-bar-edge { -->
+<!-- border-color: #443A83; -->
+<!-- } -->
+
+<!-- .js-irs-0 .irs-single, .js-irs-0 .irs-bar-edge, .js-irs-0 .irs-bar { -->
+<!-- background: #443A83; -->
+<!-- } -->
+
+<!-- .navbar-inverse { -->
+<!-- background-color: #443A83; -->
+<!-- border-color: #440154; -->
+<!-- } -->
+
+<!-- .navbar-inverse .navbar-brand { -->
+<!-- color: #a3a9ac; -->
+<!-- } -->
+
+<!-- a:hover, a:focus { -->
+<!-- color: #440154; -->
+<!-- text-decoration: underline; -->
+<!-- } -->
+
+<!-- a { -->
+<!-- color: #443A83; -->
+<!-- text-decoration: none; -->
+<!-- } -->
+
+<!-- .navbar-inverse .navbar-nav>li>a { -->
+<!-- color: #a3a9ac; -->
+<!-- } -->
+
+<!-- </style> -->
+
+
+
+
